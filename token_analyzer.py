@@ -25,10 +25,11 @@ from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from os import cpu_count
 from pathlib import Path
-from typing import Any, Dict, List, Type
+from typing import Any, Dict, List, Type, Annotated
 
 import chardet
 import tiktoken
+from cyclopts import App, Parameter
 
 # Suppress warnings from libraries
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -86,8 +87,6 @@ TARGET_EXTENSIONS = [
     ".xls",
     ".xlsx",
 ]
-# Directory to start searching from
-ROOT_DIRECTORY = "."
 # CSV report filename
 CSV_REPORT_FILENAME = "file_analysis_report.csv"
 
@@ -255,17 +254,19 @@ def save_summary_report_to_csv(summary_data: List[Dict[str, Any]], filename: str
         logging.error(f"Failed to write to CSV file {filename}: {e}")
 
 
-def analyze_files():
+app = App()
+
+def run_analysis(root_dir: Path):
     """
     Main function to find files, analyze them in parallel, and generate reports.
     """
-    logging.info("Starting file analysis...")
+    logging.info(f"Starting file analysis in: {root_dir}")
 
     all_files = []
     for ext in TARGET_EXTENSIONS:
-        all_files.extend(glob.glob(f"{ROOT_DIRECTORY}/**/*{ext}", recursive=True))
+        all_files.extend(glob.glob(f"{root_dir}/**/*{ext}", recursive=True))
         all_files.extend(
-            glob.glob(f"{ROOT_DIRECTORY}/**/*{ext.upper()}", recursive=True)
+            glob.glob(f"{root_dir}/**/*{ext.upper()}", recursive=True)
         )
 
     all_files = sorted(list(set(all_files)))
@@ -282,10 +283,8 @@ def analyze_files():
     # --- Parallel Analysis ---
     results = []
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        # executor.map processes files in parallel and returns results in order
         results = list(executor.map(process_file, all_files))
 
-    # Filter out None results from files that were not found
     results = [res for res in results if res is not None]
 
     # --- Aggregation ---
@@ -373,5 +372,18 @@ def analyze_files():
     print("=" * 50 + "\n")
 
 
+@app.default
+def main(
+    directory: Annotated[
+        Path,
+        Parameter(
+            help="The directory to analyze. Defaults to the current directory."
+        ),
+    ] = Path(".")
+):
+    """Analyzes a directory for file distribution, size, and token counts."""
+    run_analysis(directory.resolve())
+
+
 if __name__ == "__main__":
-    analyze_files()
+    app()
