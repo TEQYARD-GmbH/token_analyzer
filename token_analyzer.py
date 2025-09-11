@@ -13,6 +13,7 @@
 #     "PyMuPDF",
 #     "llama-index-readers-json>=0.4.1",
 #     "pikepdf",
+#     "cyclopts"
 # ]
 # ///
 
@@ -25,7 +26,7 @@ from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from os import cpu_count
 from pathlib import Path
-from typing import Any, Dict, List, Type, Annotated
+from typing import Annotated, Any, Dict, List, Type
 
 import chardet
 import tiktoken
@@ -256,6 +257,7 @@ def save_summary_report_to_csv(summary_data: List[Dict[str, Any]], filename: str
 
 app = App()
 
+
 def run_analysis(root_dir: Path):
     """
     Main function to find files, analyze them in parallel, and generate reports.
@@ -265,9 +267,7 @@ def run_analysis(root_dir: Path):
     all_files = []
     for ext in TARGET_EXTENSIONS:
         all_files.extend(glob.glob(f"{root_dir}/**/*{ext}", recursive=True))
-        all_files.extend(
-            glob.glob(f"{root_dir}/**/*{ext.upper()}", recursive=True)
-        )
+        all_files.extend(glob.glob(f"{root_dir}/**/*{ext.upper()}", recursive=True))
 
     all_files = sorted(list(set(all_files)))
 
@@ -376,10 +376,8 @@ def run_analysis(root_dir: Path):
 def main(
     directory: Annotated[
         Path,
-        Parameter(
-            help="The directory to analyze. Defaults to the current directory."
-        ),
-    ] = Path(".")
+        Parameter(help="The directory to analyze. Defaults to the current directory."),
+    ] = Path("."),
 ):
     """Analyzes a directory for file distribution, size, and token counts."""
     run_analysis(directory.resolve())

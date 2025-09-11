@@ -14,4 +14,7 @@ This script analyzes a directory of files, counts the tokens in each file, and g
 ## Usage
 
 1. Place the script in the root directory of the project you want to analyze.
-2. Run the script: `uv run token_analyzer.py`
+2. Run the script:
+
+- `uv run token_analyzer.py` to analyze the current folder
+- `uv run token_analyzer.py /path/to/folder` to analyze a different one
