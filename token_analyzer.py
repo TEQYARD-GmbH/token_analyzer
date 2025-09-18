@@ -346,22 +346,30 @@ def run_analysis(root_dir: Path):
         per_file_report_data, key=lambda x: x["size_mb"], reverse=True
     )
     for item in sorted_by_size[:20]:
-        print(f"{item['size_mb']:8.2f} MB - {item['file_path']}")
+        print(f"{item['size_mb']:.2f} MB - {item['file_path']}")
     print("\n" + "-" * 50 + "\n")
 
     # 4. Token Counts
-    print("--- Token Count Summary ---")
-    print(f"Total estimated tokens across all files: {total_tokens:,}")
-
-    print("\n--- Top 20 Files by Token Count (Descending) ---")
+    print("--- Top 20 Files by Token Count (Descending) ---")
     sorted_by_tokens = sorted(
         per_file_report_data, key=lambda x: x["token_count"], reverse=True
     )
     for item in sorted_by_tokens[:20]:
-        print(f"{item['token_count']:10,} tokens - {item['file_path']}")
+        print(f"{item['token_count']:,} tokens - {item['file_path']}")
+
+    print("\n" + "-" * 50 + "\n")
+    print("--- Token Count Summary ---")
+    print(f"Total estimated tokens across all files: {total_tokens:,}")
 
     print("\n" + "-" * 50 + "\n")
 
+    # 5. Costs
+    print("--- Estimated costs (2025-09-18) ---")
+    print(
+        f"Total estimated costs for initial ingestion: €{round(total_tokens / 1000 * 0.000137, 4)}"
+    )
+
+    print("\n" + "-" * 50 + "\n")
     # --- CSV Report Confirmation ---
     print("--- CSV Reports Saved ---")
     print("Detailed per-file report saved to: file_analysis_report.csv")
