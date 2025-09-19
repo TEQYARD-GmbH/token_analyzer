@@ -269,7 +269,7 @@ def run_analysis(root_dir: Path):
         all_files.extend(glob.glob(f"{root_dir}/**/*{ext}", recursive=True))
         all_files.extend(glob.glob(f"{root_dir}/**/*{ext.upper()}", recursive=True))
 
-    all_files = sorted(list(set(all_files)))
+    all_files = sorted(set(all_files))
 
     if not all_files:
         logging.warning("No files found with the specified extensions. Exiting.")
@@ -277,7 +277,8 @@ def run_analysis(root_dir: Path):
 
     max_workers = max(1, int(cpu_count() * 0.75))
     logging.info(
-        f"Found {len(all_files)} files to analyze. Using up to {max_workers} processes (75% of available cores)."
+        "Found %d files to analyze. Using up to %d processes (75%% of available cores).",
+        len(all_files), max_workers
     )
 
     # --- Parallel Analysis ---
