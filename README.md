@@ -18,3 +18,4 @@ This script analyzes a directory of files, counts the tokens in each file, and g
 
 - `uv run token_analyzer.py` to analyze the current folder
 - `uv run token_analyzer.py /path/to/folder` to analyze a different one
+- `uv run token_analyzer.py /path/to/folder True` to include Excel files
