@@ -83,8 +83,6 @@ TARGET_EXTENSIONS = [
     ".pptm",
     ".pptx",
     ".txt",
-    # ".xls",
-    # ".xlsx",
 ]
 # CSV report filename
 CSV_REPORT_FILENAME = "file_analysis_report.csv"
@@ -386,8 +384,20 @@ def main(
         Path,
         Parameter(help="The directory to analyze. Defaults to the current directory."),
     ] = Path("."),
+    excel: Annotated[
+        bool,
+        Parameter(help="If excel files should be included. Defaults to False"),
+    ] = False,
 ):
     """Analyzes a directory for file distribution, size, and token counts."""
+    if excel:
+        logging.info("Including excel files.")
+        TARGET_EXTENSIONS.extend(
+            [
+                ".xls",
+                ".xlsx",
+            ]
+        )
     run_analysis(directory.resolve())
 
 
