@@ -4,7 +4,7 @@
 #     "pandas",
 #     "openpyxl",
 #     "python-docx",
-#     "markitdown[docx,pptx]",
+#     "markitdown[docx,pptx,pdf]",
 #     "tiktoken",
 #     "chardet",
 #     "llama-index-readers-file",
