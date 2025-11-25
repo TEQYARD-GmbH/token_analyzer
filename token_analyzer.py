@@ -13,7 +13,8 @@
 #     "PyMuPDF",
 #     "llama-index-readers-json>=0.4.1",
 #     "pikepdf",
-#     "cyclopts"
+#     "cyclopts",
+#     "xlrd"
 # ]
 # ///
 
@@ -367,7 +368,7 @@ def run_analysis(root_dir: Path):
     # 5. Costs
     print("--- Estimated costs (2025-09-18) ---")
     print(
-        f"Total estimated costs for initial ingestion: €{round(total_tokens / 1000 * 0.000137, 4)}"
+        f"Total estimated costs for initial ingestion: €{round(total_tokens / 1000 * 0.000104, 4)}"
     )
 
     print("\n" + "-" * 50 + "\n")
