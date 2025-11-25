@@ -52,9 +52,6 @@ try:
     from llama_index.readers.file.docs import (
         HWPReader,
     )
-    from llama_index.readers.file.docs import (
-        PDFReader as LlamaIndexPDFReader,
-    )
     from llama_index.readers.file.epub import EpubReader
     from llama_index.readers.file.ipynb import IPYNBReader
     from llama_index.readers.file.mbox import MboxReader
@@ -86,8 +83,8 @@ TARGET_EXTENSIONS = [
     ".pptm",
     ".pptx",
     ".txt",
-    ".xls",
-    ".xlsx",
+    # ".xls",
+    # ".xlsx",
 ]
 # CSV report filename
 CSV_REPORT_FILENAME = "file_analysis_report.csv"
@@ -125,7 +122,7 @@ class ExcelReader(BaseReader):
 # Maps file extensions to their corresponding reader classes.
 FILE_READER_CLS: Dict[str, Type[BaseReader]] = {
     ".hwp": HWPReader,
-    ".pdf": LlamaIndexPDFReader,
+    ".pdf": MSReader,
     ".docx": MSReader,
     ".pptx": MSReader,
     ".ppt": MSReader,
@@ -279,7 +276,8 @@ def run_analysis(root_dir: Path):
     max_workers = max(1, int(cpu_count() * 0.75))
     logging.info(
         "Found %d files to analyze. Using up to %d processes (75%% of available cores).",
-        len(all_files), max_workers
+        len(all_files),
+        max_workers,
     )
 
     # --- Parallel Analysis ---
