@@ -27,7 +27,7 @@ from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from os import cpu_count
 from pathlib import Path
-from typing import Annotated, Any, Dict, List, Type
+from typing import Annotated, Any, Dict, Iterator, List, Type
 
 import chardet
 import tiktoken
@@ -86,6 +86,8 @@ TARGET_EXTENSIONS = [
 ]
 # CSV report filename
 CSV_REPORT_FILENAME = "file_analysis_report.csv"
+# Batch size for processing files (reduce if memory issues persist)
+BATCH_SIZE = 50
 
 
 # --- Custom Readers based on user's code ---
@@ -207,12 +209,40 @@ def process_file(file_path_str: str) -> Dict[str, Any]:
     text_content = load_file_to_text(file_path)
     tokens = count_tokens(text_content, tokenizer) if text_content else 0
 
+    # Clear text_content immediately to free memory
+    del text_content
+
     return {
         "path": file_path_str,
         "ext": ext,
         "size_bytes": size_bytes,
         "tokens": tokens,
     }
+
+
+def batch_iterator(items: List[str], batch_size: int) -> Iterator[List[str]]:
+    """Yield successive batches from items."""
+    for i in range(0, len(items), batch_size):
+        yield items[i : i + batch_size]
+
+
+def append_to_csv(
+    data: List[Dict[str, Any]], filename: str, write_header: bool = False
+):
+    """Appends data to a CSV file incrementally."""
+    if not data:
+        return
+
+    mode = "w" if write_header else "a"
+    try:
+        with open(filename, mode, newline="", encoding="utf-8") as csvfile:
+            fieldnames = ["file_path", "size_mb", "token_count"]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            if write_header:
+                writer.writeheader()
+            writer.writerows(data)
+    except IOError as e:
+        logging.error(f"Failed to write to CSV file {filename}: {e}")
 
 
 def save_per_file_report_to_csv(report_data: List[Dict[str, Any]], filename: str):
@@ -254,9 +284,10 @@ def save_summary_report_to_csv(summary_data: List[Dict[str, Any]], filename: str
 app = App()
 
 
-def run_analysis(root_dir: Path):
+def run_analysis(root_dir: Path, batch_size: int = BATCH_SIZE):
     """
-    Main function to find files, analyze them in parallel, and generate reports.
+    Main function to find files, analyze them in parallel batches, and generate reports.
+    Processes files in batches to reduce memory usage.
     """
     logging.info(f"Starting file analysis in: {root_dir}")
 
@@ -277,34 +308,78 @@ def run_analysis(root_dir: Path):
         len(all_files),
         max_workers,
     )
+    logging.info(
+        f"Processing in batches of {batch_size} files to optimize memory usage."
+    )
 
-    # --- Parallel Analysis ---
-    results = []
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        results = list(executor.map(process_file, all_files))
+    # --- Initialize CSV with header ---
+    per_file_csv = "file_analysis_report.csv"
+    append_to_csv([], per_file_csv, write_header=True)
 
-    results = [res for res in results if res is not None]
-
-    # --- Aggregation ---
+    # --- Aggregation counters ---
     extension_counts = Counter()
     token_counts_by_ext = Counter()
     total_tokens = 0
 
-    for res in results:
-        extension_counts[res["ext"]] += 1
-        token_counts_by_ext[res["ext"]] += res["tokens"]
-        total_tokens += res["tokens"]
+    # Track top files for reporting (limit memory usage)
+    top_files_by_size = []
+    top_files_by_tokens = []
+    max_top_files = 20
 
-    # --- Combine data for reports ---
-    per_file_report_data = [
-        {
-            "file_path": res["path"],
-            "size_mb": round(res["size_bytes"] / 1024 / 1024, 4),
-            "token_count": res["tokens"],
-        }
-        for res in results
-    ]
+    # --- Process files in batches ---
+    processed_count = 0
+    for batch_num, batch in enumerate(batch_iterator(all_files, batch_size), 1):
+        logging.info(
+            f"Processing batch {batch_num}/{(len(all_files) + batch_size - 1) // batch_size}"
+        )
 
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            batch_results = list(executor.map(process_file, batch))
+
+        batch_results = [res for res in batch_results if res is not None]
+
+        # Process batch results
+        batch_report_data = []
+        for res in batch_results:
+            # Update counters
+            extension_counts[res["ext"]] += 1
+            token_counts_by_ext[res["ext"]] += res["tokens"]
+            total_tokens += res["tokens"]
+
+            # Prepare per-file data
+            file_data = {
+                "file_path": res["path"],
+                "size_mb": round(res["size_bytes"] / 1024 / 1024, 4),
+                "token_count": res["tokens"],
+            }
+            batch_report_data.append(file_data)
+
+            # Track top files (memory-efficient approach)
+            if len(top_files_by_size) < max_top_files:
+                top_files_by_size.append(file_data)
+                top_files_by_size.sort(key=lambda x: x["size_mb"], reverse=True)
+            elif file_data["size_mb"] > top_files_by_size[-1]["size_mb"]:
+                top_files_by_size[-1] = file_data
+                top_files_by_size.sort(key=lambda x: x["size_mb"], reverse=True)
+
+            if len(top_files_by_tokens) < max_top_files:
+                top_files_by_tokens.append(file_data)
+                top_files_by_tokens.sort(key=lambda x: x["token_count"], reverse=True)
+            elif file_data["token_count"] > top_files_by_tokens[-1]["token_count"]:
+                top_files_by_tokens[-1] = file_data
+                top_files_by_tokens.sort(key=lambda x: x["token_count"], reverse=True)
+
+        # Append batch results to CSV immediately
+        append_to_csv(batch_report_data, per_file_csv, write_header=False)
+
+        processed_count += len(batch_results)
+        logging.info(f"Processed {processed_count}/{len(all_files)} files")
+
+        # Clear batch data to free memory
+        del batch_results
+        del batch_report_data
+
+    # --- Generate summary report ---
     summary_report_data = [
         {
             "file_type": ext,
@@ -314,8 +389,6 @@ def run_analysis(root_dir: Path):
         for ext, count in extension_counts.items()
     ]
 
-    # --- Save to CSVs ---
-    save_per_file_report_to_csv(per_file_report_data, "file_analysis_report.csv")
     save_summary_report_to_csv(summary_report_data, "file_type_summary.csv")
 
     # --- Console Reporting ---
@@ -339,20 +412,14 @@ def run_analysis(root_dir: Path):
     print("\n" + "-" * 50 + "\n")
 
     # 3. Files by Size (showing top 20)
-    print("--- Top 20 Files by Size (Descending) ---")
-    sorted_by_size = sorted(
-        per_file_report_data, key=lambda x: x["size_mb"], reverse=True
-    )
-    for item in sorted_by_size[:20]:
+    print(f"--- Top {max_top_files} Files by Size (Descending) ---")
+    for item in top_files_by_size:
         print(f"{item['size_mb']:.2f} MB - {item['file_path']}")
     print("\n" + "-" * 50 + "\n")
 
     # 4. Token Counts
-    print("--- Top 20 Files by Token Count (Descending) ---")
-    sorted_by_tokens = sorted(
-        per_file_report_data, key=lambda x: x["token_count"], reverse=True
-    )
-    for item in sorted_by_tokens[:20]:
+    print(f"--- Top {max_top_files} Files by Token Count (Descending) ---")
+    for item in top_files_by_tokens:
         print(f"{item['token_count']:,} tokens - {item['file_path']}")
 
     print("\n" + "-" * 50 + "\n")
@@ -383,11 +450,17 @@ def main(
     directory: Annotated[
         Path,
         Parameter(help="The directory to analyze. Defaults to the current directory."),
-    ] = Path("."),
+    ],
     excel: Annotated[
         bool,
         Parameter(help="If excel files should be included. Defaults to False"),
     ] = False,
+    batch_size: Annotated[
+        int,
+        Parameter(
+            help="Number of files to process per batch. Lower values use less memory."
+        ),
+    ] = BATCH_SIZE,
 ):
     """Analyzes a directory for file distribution, size, and token counts."""
     if excel:
@@ -398,7 +471,7 @@ def main(
                 ".xlsx",
             ]
         )
-    run_analysis(directory.resolve())
+    run_analysis(directory.resolve(), batch_size=batch_size)
 
 
 if __name__ == "__main__":
