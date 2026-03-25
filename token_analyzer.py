@@ -1,37 +1,77 @@
 # /// script
 # dependencies = [
-#     "llama-index",
-#     "pandas",
-#     "openpyxl",
-#     "python-docx",
-#     "markitdown[docx,pptx,pdf]",
-#     "tiktoken",
-#     "chardet",
-#     "llama-index-readers-file",
-#     "llama-index-readers-web",
-#     "beautifulsoup4",
 #     "PyMuPDF",
-#     "llama-index-readers-json>=0.4.1",
-#     "pikepdf",
+#     "beautifulsoup4",
+#     "chardet",
 #     "cyclopts",
-#     "xlrd"
+#     "docling-parse",
+#     "docling>=2.0.0",
+#     "llama-index",
+#     "llama-index-readers-file",
+#     "llama-index-readers-json>=0.4.1",
+#     "llama-index-readers-web",
+#     "llama-index-readers-docling",
+#     "llama-index-node-parser-docling",
+#     "markitdown[docx,pptx,pdf]",
+#     "openpyxl",
+#     "pandas",
+#     "pikepdf",
+#     "pypdfium2",
+#     "libpff-python",
+#     "python-docx",
+#     "tiktoken",
+#     "xlrd",
 # ]
 # ///
 
 import csv
 import glob
 import logging
+import multiprocessing as mp
 import os
 import warnings
-from collections import Counter
+from collections import Counter, deque
+from collections.abc import Generator
 from concurrent.futures import ProcessPoolExecutor
+from io import BytesIO
+from multiprocessing.pool import Pool
 from os import cpu_count
 from pathlib import Path
 from typing import Annotated, Any, Dict, Iterator, List, Type
 
 import chardet
+import pypff
 import tiktoken
 from cyclopts import App, Parameter
+from docling.datamodel.base_models import InputFormat
+from docling.datamodel.pipeline_options import (
+    PdfPipelineOptions,
+)
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling_core.transforms.chunker.hierarchical_chunker import (
+    ChunkingDocSerializer,
+    ChunkingSerializerProvider,
+)
+from docling_core.transforms.chunker.page_chunker import PageChunker
+from docling_core.transforms.serializer.markdown import MarkdownTableSerializer
+from llama_index.core.readers.base import BaseReader
+from llama_index.core.schema import Document
+from llama_index.node_parser.docling import DoclingNodeParser
+from llama_index.readers.docling import DoclingReader
+from llama_index.readers.file import (
+    MarkdownReader,
+    PandasExcelReader,
+)
+from llama_index.readers.file.docs import (
+    HWPReader,
+)
+from llama_index.readers.file.epub import EpubReader
+from llama_index.readers.file.ipynb import IPYNBReader
+from llama_index.readers.file.mbox import MboxReader
+from llama_index.readers.web import (
+    SimpleWebPageReader as HTMLReader,
+)
+from markitdown import MarkItDown
 
 # Suppress warnings from libraries
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -39,32 +79,32 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# --- LlamaIndex and other library imports ---
-# These are heavy imports, so we do them carefully.
-try:
-    from llama_index.core.readers.base import BaseReader
-    from llama_index.core.schema import Document
-    from llama_index.readers.file import (
-        MarkdownReader,
-        PandasCSVReader,
-        PandasExcelReader,
-    )
-    from llama_index.readers.file.docs import (
-        HWPReader,
-    )
-    from llama_index.readers.file.epub import EpubReader
-    from llama_index.readers.file.ipynb import IPYNBReader
-    from llama_index.readers.file.mbox import MboxReader
-    from llama_index.readers.json import JSONReader
-    from llama_index.readers.web import (
-        SimpleWebPageReader as HTMLReader,
-    )  # Using SimpleWebPageReader for HTML
-    from markitdown import MarkItDown
-except ImportError as e:
-    logging.error(
-        f"Failed to import a required library. Please add package to list of dependencies. Error: {e}"
-    )
-    exit(1)
+PDF_PROCESSING_TIMEOUT = 300.0
+_WORKER_POOL = None
+_CACHED_DOCLING_CONVERTER = None
+
+
+def _get_worker_pool() -> Pool:
+    """Creates or retrieves the persistent pool."""
+    global _WORKER_POOL
+    if _WORKER_POOL is None:
+        ctx = mp.get_context("spawn")
+        _WORKER_POOL = ctx.Pool(processes=1, maxtasksperchild=100)
+    return _WORKER_POOL
+
+
+def _reset_worker_pool() -> None:
+    """Zerstört den Pool hart (bei Hängern/Timeouts)."""
+    global _WORKER_POOL
+    if _WORKER_POOL:
+        try:
+            _WORKER_POOL.terminate()
+            _WORKER_POOL.join()
+        except Exception as e:
+            logging.error(f"Error terminating pool: {e}")
+        finally:
+            _WORKER_POOL = None
+
 
 # --- Configuration ---
 # File extensions to be analyzed, case-insensitive
@@ -82,6 +122,7 @@ TARGET_EXTENSIONS = [
     ".ppt",
     ".pptm",
     ".pptx",
+    ".pst",
     ".txt",
 ]
 # CSV report filename
@@ -91,6 +132,212 @@ BATCH_SIZE = 50
 
 
 # --- Custom Readers based on user's code ---
+
+
+class PSTArchive:
+    """Provides methods for manipulating a PST archive."""
+
+    def __init__(self, file: Path | str | None = None) -> None:
+        self.filepath: str | None = None
+        if pypff is None:
+            raise ImportError(
+                "pypff is required for PST file support. Install with: pip install pypff"
+            )
+        self._data = pypff.file()
+
+        if file:
+            self.load(file)
+
+    def __enter__(self) -> "PSTArchive":
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self._data.close()
+
+    def load(self, file: Path | str) -> None:
+        """Opens a PST file using libpff."""
+        if isinstance(file, Path):
+            file = str(file)
+        self._data.open(file, "rb")
+        self.filepath = file
+
+    def folders(self, bfs: bool = True) -> Generator[pypff.folder, None, None]:
+        """Generator function to iterate over the archive's folders."""
+        folders = deque([self._data.root_folder])
+
+        while folders:
+            folder = folders.pop()
+            yield folder
+            if bfs:
+                folders.extendleft(folder.sub_folders)
+            else:
+                folders.extend(folder.sub_folders)
+
+    def messages(self, bfs: bool = True) -> Generator[pypff.message, None, None]:
+        """Generator function to iterate over the archive's messages."""
+        for folder in self.folders(bfs):
+            try:
+                yield from folder.sub_messages
+            except OSError as exc:
+                logging.debug(exc, exc_info=True)
+
+
+class MarkitdownReader(BaseReader):
+    def load_data(self, file: Path) -> List[Document]:
+        md = MarkItDown(enable_plugins=False)
+        conversion_result = md.convert(file, extract_pages=True)
+        if conversion_result.pages is None:
+            conversion_result.pages = [
+                type(
+                    "PageInfo",
+                    (),
+                    {"content": conversion_result.markdown, "page_number": 1},
+                )()
+            ]
+        results = []
+        for page in conversion_result.pages:
+            markdown_reader = MarkdownReader()
+            content = markdown_reader.remove_hyperlinks(page.content)
+            content = markdown_reader.remove_images(content)
+            results.append(
+                Document(text=content, extra_info={"page_label": str(page.page_number)})
+            )
+        return results
+
+
+_PROCESS_CACHED = {}
+
+
+def _init_worker_converter():
+    """Initialize docling converter once per worker process."""
+    global _PROCESS_CACHED
+    if "converter" not in _PROCESS_CACHED:
+
+        class MDTableSerializerProvider(ChunkingSerializerProvider):
+            def get_serializer(self, doc):
+                return ChunkingDocSerializer(
+                    doc=doc, table_serializer=MarkdownTableSerializer()
+                )
+
+        converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(
+                    pipeline_options=PdfPipelineOptions(
+                        document_timeout=PDF_PROCESSING_TIMEOUT
+                    )
+                ),
+            }
+        )
+        _PROCESS_CACHED = {
+            "converter": converter,
+            "md_table_provider": MDTableSerializerProvider,
+            "docling_reader": DoclingReader,
+            "docling_node_parser": DoclingNodeParser,
+            "page_chunker": PageChunker,
+        }
+    return _PROCESS_CACHED
+
+
+class DoclingCustomReader(BaseReader):
+    def load_data(self, file: Path) -> List[Document]:
+        docs: List[Document] = []
+        pdf_size_limit = 500
+
+        if (
+            "pdf" in file.suffix.lower()
+            and file.stat().st_size / 1024**2 > pdf_size_limit
+        ):
+            logging.warning(
+                f"{file.name} larger than {pdf_size_limit} MB. File was {round(file.stat().st_size / 1024**2, 2)} MB."
+            )
+            return docs
+
+        cached = _init_worker_converter()
+
+        try:
+            reader = cached["docling_reader"](
+                export_type=DoclingReader.ExportType.JSON,
+                doc_converter=cached["converter"],
+            )
+            json_docs = reader.load_data(file)
+
+            node_parser = cached["docling_node_parser"](
+                chunker=cached["page_chunker"](
+                    serializer_provider=cached["md_table_provider"](),
+                )
+            )
+
+            nodes = node_parser.get_nodes_from_documents(documents=json_docs)
+
+            docs = [
+                Document(
+                    doc_id=node.id_,
+                    text=node.get_content(),
+                    metadata={"page_label": str(idx + 1)},
+                )
+                for idx, node in enumerate(nodes)
+            ]
+
+            if not docs:
+                docs = [
+                    Document(doc_id=doc.id_, text="") for _, doc in enumerate(json_docs)
+                ]
+
+        except Exception as e:
+            logging.exception("Failed to transform into docling", exc_info=e)
+
+        return docs
+
+
+class PSTReader(BaseReader):
+    md = MarkItDown()
+
+    def extract_text(self, message) -> str:
+        """Extract text content from a PST email message."""
+        text = ""
+        if message.plain_text_body:
+            text = message.plain_text_body
+        elif hasattr(message, "html_body") and message.html_body:
+            text = self.md.convert(BytesIO(message.html_body)).markdown
+        elif hasattr(message, "rtf_body") and message.rtf_body:
+            text = message.rtf_body
+
+        if isinstance(text, bytes):
+            text = text.decode("utf-8", errors="replace")
+
+        if text:
+            sent_date = (
+                message.client_submit_time.strftime("%d.%m.%Y %H:%M Uhr") + "\n"
+                if message.client_submit_time
+                else ""
+            )
+            sender_name = message.sender_name + "\n" if message.sender_name else ""
+            subject = message.subject + "\n" if message.subject else ""
+            header = sent_date + sender_name + subject + "\n"
+            text = text.replace("\\_", "")
+            text = header + text
+
+        return text
+
+    def load_data(self, file: Path) -> List[Document]:
+        if pypff is None:
+            logging.error("pypff not installed. Cannot process PST files.")
+            return []
+
+        pst_archive = PSTArchive(file)
+        mails = []
+        for message in pst_archive.messages():
+            try:
+                text = self.extract_text(message)
+                if text:
+                    mails.append(Document(text=text))
+            except OSError:
+                pass
+            except Exception as e:
+                logging.exception("Failed to transform pst file", exc_info=e)
+
+        logging.info(f"Extracted {len(mails)} mails.")
+        return mails
 
 
 class MSReader(BaseReader):
@@ -122,20 +369,23 @@ class ExcelReader(BaseReader):
 # Maps file extensions to their corresponding reader classes.
 FILE_READER_CLS: Dict[str, Type[BaseReader]] = {
     ".hwp": HWPReader,
-    ".pdf": MSReader,
-    ".docx": MSReader,
-    ".pptx": MSReader,
-    ".ppt": MSReader,
-    ".pptm": MSReader,
-    ".csv": PandasCSVReader,
+    ".pdf": DoclingCustomReader,
+    ".docx": DoclingCustomReader,
+    ".pptx": DoclingCustomReader,
+    ".ppt": DoclingCustomReader,
+    ".pptm": DoclingCustomReader,
+    ".jpg": DoclingCustomReader,
+    ".png": DoclingCustomReader,
+    ".jpeg": DoclingCustomReader,
+    ".csv": DoclingCustomReader,
     ".epub": EpubReader,
-    ".md": MarkdownReader,
+    ".md": DoclingCustomReader,
     ".mbox": MboxReader,
     ".ipynb": IPYNBReader,
-    ".xlsx": ExcelReader,
-    ".xls": ExcelReader,
-    ".json": JSONReader,
-    ".html": HTMLReader,
+    ".xlsx": DoclingCustomReader,
+    ".xls": DoclingCustomReader,
+    ".xltx": DoclingCustomReader,
+    ".pst": PSTReader,
 }
 
 # --- Core Functions ---
